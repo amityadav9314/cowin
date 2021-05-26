@@ -1,12 +1,28 @@
 import hashlib
 import json
-import traceback
-
+import os
 import time
+import traceback
 from datetime import datetime
+from enum import Enum
 from types import SimpleNamespace
 
 import requests
+
+
+class SearchType(Enum):
+    PINCODE = 1
+    DISTRICT = 2
+
+
+district_id_chat_ids_map = {
+    651: [],
+}
+
+pincode_chat_ids_map = {
+    110077: [],
+    110075: [],
+}
 
 
 def get_cowin_response_by_district(district_id, date):
@@ -43,12 +59,22 @@ def get_cowin_response_by_pincode(pincode, date):
     return parsed_res
 
 
-def check_dose1_and_get_centers():
+def check_dose1_and_get_centers(pincode=None, district_id=None):
     available_centers = []
+
+    if not any([pincode, district_id]):
+        return available_centers
+
+    if all([pincode, district_id]):
+        raise Exception("Only one of pincode or district_id exptected")
+
     today = datetime.today().strftime("%d-%m-%Y")
+
     try:
-        resp = get_cowin_response_by_district(district_id="651", date=today)
-        # resp = get_cowin_response_by_pincode(pincode="201009", date=today)
+        if pincode:
+            resp = get_cowin_response_by_pincode(pincode=pincode, date=today)
+        else:
+            resp = get_cowin_response_by_district(district_id=district_id, date=today)
     except Exception as e:
         print("Exception occurred")
         print(traceback.format_exc())
@@ -90,34 +116,61 @@ def get_formatted_response(available_centers):
 
 
 def run(wait_duration=60):
-    # pretty = Formatter()
-    formatted_response = None
     do_loop = True
+    pincode_formatted_response = None
+    district_formatted_response = None
     while do_loop:
-        print("\nChecking slots after %s seconds" % wait_duration)
-        available_centers = check_dose1_and_get_centers()
+        # TODO Make the below calls parallel
+        try:
+            pincode_formatted_response = hit_api_and_telegram_slots(
+                SearchType.PINCODE, pincode_chat_ids_map,
+                pincode_formatted_response, wait_duration
+            )
+            district_formatted_response = hit_api_and_telegram_slots(
+                SearchType.DISTRICT, district_id_chat_ids_map,
+                district_formatted_response, wait_duration
+            )
+        except Exception as e:
+            error = None
+            if hasattr(e, 'message'):
+                error = e.message
+            msg = "Code kahin fata h, dekh use jaldi se. %s" % error
+            users = []
+            telegram_msg(msg, users)
+        print("Sleeping for %s seconds" % wait_duration)
+        print("=" * 100)
+        # do_loop = False
+        time.sleep(wait_duration)
+
+
+def hit_api_and_telegram_slots(search_type, chat_map, formatted_response, wait_duration):
+    for k in chat_map:
+        code = k
+        registered_users = chat_map[k]
+        print("\nChecking slots for %s: %s after %s seconds" % (search_type, code, wait_duration))
+        if search_type == SearchType.PINCODE:
+            available_centers = check_dose1_and_get_centers(pincode=str(code))
+        else:
+            available_centers = check_dose1_and_get_centers(district_id=str(code))
         if len(available_centers) > 0:
             print("\tSending message on telegram")
             md5_hash_old = generate_hash(formatted_response)
             formatted_response = get_formatted_response(available_centers)
             md5_hash_new = generate_hash(formatted_response)
             if md5_hash_old != md5_hash_new:
-                telegram_msg(formatted_response)
+                telegram_msg(formatted_response, registered_users)
             else:
                 print("\tNot telegraming as msg is same as old")
         else:
             print("\tSlots not available")
-
-        print("\tSleeping for %s seconds" % wait_duration)
-        # do_loop = False
-        time.sleep(wait_duration)
+    return formatted_response
 
 
-def telegram_msg(msg):
-    registered_users = [] # List of chat ids
+def telegram_msg(msg, registered_users):
+    token = os.environ["telegram_bot_token"]
     for user in registered_users:
-        url = "https://api.telegram.org/bot{token}/sendMessage?text=%s&parse_mode=markdown&chat_id=%s"
-        requests.get(url % (msg, user))
+        url = "https://api.telegram.org/bot%s/sendMessage?text=%s&parse_mode=markdown&chat_id=%s" % (token, msg, user)
+        requests.get(url)
 
 
 def generate_hash(msg):
@@ -129,5 +182,5 @@ def generate_hash(msg):
 
 
 if __name__ == "__main__":
-    run(10)
+    run(30)
 
